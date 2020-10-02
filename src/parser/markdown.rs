@@ -12,13 +12,31 @@ use nom::{
 
 pub type MarkdownText = Vec<MarkdownInLine>;
 
+
+// TODO: Right now lists can not be nested and will be parsed as plain text in quotes
+//  Add something similar to Markdown::List(Vec<Markdown>) maybe? So maybe this can work:
+//  Md::List(vec![
+//      Md::Heading(1, vec![MIL::Plain("Food")])
+//      Md::List(vec![
+//          Md::Text(vec![MIL::Plain("text")],
+//          Md::Text(vec![MIL::Bold("bold"), MIL::Plain("text")],
+//      ]),
+//      Md::Text(vec![Mil::Plain("hope this works")])
+//  ])
+//  for:
+//  - Food
+//      - text
+//      - **bold** text
+//  - hope this works
+
+// TODO:  After that make quote nested?
 #[derive(Clone, Debug, PartialEq)]
 pub enum Markdown {
     // (num of #, text)
     Heading(usize, MarkdownText),
     OrderedList(Vec<MarkdownText>),
     UnorderedList(Vec<MarkdownText>),
-    Quote(MarkdownText),
+    Quote(Vec<MarkdownText>),
     CodeBlock(String, Option<String>),
     Text(MarkdownText),
 }
@@ -105,7 +123,7 @@ pub fn parse_markdown_text(i: &str) -> IResult<&str, MarkdownText> {
 pub fn parse_header_tag(i: &str) -> IResult<&str, usize> {
     map(
         terminated(take_while1(|c| c == '#'), tag(" ")),
-        |s: &str| s.len()
+        |s: &str| s.len(),
     )(i)
 }
 
@@ -139,20 +157,33 @@ pub fn parse_ordered_list_element(i: &str) -> IResult<&str, MarkdownText> {
 pub fn parse_ordered_list(i: &str) -> IResult<&str, Vec<MarkdownText>> {
     many1(parse_ordered_list_element)(i)
 }
-// ``` lang
+
+// > text
+pub fn parse_quote_tag(i: &str) -> IResult<&str, &str> {
+    terminated(tag(">"), tag(" "))(i)
+}
+
+pub fn parse_quote_line(i: &str) -> IResult<&str, MarkdownText> {
+    preceded(parse_quote_tag, parse_markdown_text)(i)
+}
+
+// > #text
+// > this is a quote
+// > - list in quote
+// > - list in quote
+pub fn parse_quote(i: &str) -> IResult<&str, Vec<MarkdownText>> {
+    many1(parse_quote_line)(i)
+}
+
+// ``` lang\n
 //  text
 // ```
 //
-
 pub fn parse_code_block(i: &str) -> IResult<&str, (&str, &str)> {
     tuple((
-        delimited(tag("```"), is_not("\n"),tag("\n")),
+        delimited(tag("```"), is_not("\n"), tag("\n")),
         delimited(tag(""), is_not("```"), tag("```"))
     ))(i)
-    // tuple((
-    //     delimited(tag("```"), is_not("```"), tag("```")),
-    //     opt(is_not("\t\r\n"))
-    // ))(i)
 }
 
 pub fn parse_markdown(i: &str) -> IResult<&str, Vec<Markdown>> {
@@ -160,12 +191,13 @@ pub fn parse_markdown(i: &str) -> IResult<&str, Vec<Markdown>> {
         map(parse_header, |e| Markdown::Heading(e.0, e.1)),
         map(parse_ordered_list, |e| Markdown::OrderedList(e)),
         map(parse_unordered_list, |e| Markdown::UnorderedList(e)),
+        map(parse_quote, |e| Markdown::Quote(e)),
         map(parse_code_block, |(language, code)| {
             let mut lang = None;
+            let language = language.trim();
             if language != "" {
                 lang = Some(String::from(language));
             }
-
             Markdown::CodeBlock(code.to_string(), lang)
         }),
         map(parse_markdown_text, |e| Markdown::Text(e)),
@@ -365,7 +397,7 @@ mod tests {
                 "",
                 (MarkdownInLine::Link(
                     String::from("title"),
-                    String::from("https://www.example.com")
+                    String::from("https://www.example.com"),
                 ))
             ))
         );
@@ -715,5 +747,93 @@ mod tests {
                 Markdown::CodeBlock(String::from("import foobar\n\nfoobar.pluralize('word') # returns 'words'\nfoobar.pluralize('goose') # returns 'geese'\nfoobar.singularize('phenomena') # returns 'phenomenon'\n"), Some(String::from("python"))),
             ]))
         )
+    }
+
+    #[test]
+    fn test_parse_quote_tag() {
+        assert_eq!(
+            parse_quote_tag("> "),
+            Ok(("", ">"))
+        );
+        assert_eq!(
+            parse_quote_tag("> this is a quote\n"),
+            Ok(("this is a quote\n", ">"))
+        );
+        assert_eq!(
+            parse_quote_tag("> this is a quote\n> this is another quote\n"),
+            Ok(("this is a quote\n> this is another quote\n", ">"))
+        );
+        assert_eq!(
+            parse_quote_tag("> **this is a bold quote**\n"),
+            Ok(("**this is a bold quote**\n", ">"))
+        );
+        assert_eq!(
+            parse_quote_tag(""),
+            Err(Error(("", ErrorKind::Tag)))
+        );
+        assert_eq!(
+            parse_quote_tag("not a quote"),
+            Err(Error(("not a quote", ErrorKind::Tag)))
+        );
+        assert_eq!(
+            parse_quote_tag(">"),
+            Err(Error(("", ErrorKind::Tag)))
+        );
+        assert_eq!(
+            parse_quote_tag(">not a quote"),
+            Err(Error(("not a quote", ErrorKind::Tag)))
+        );
+    }
+
+    #[test]
+    fn test_parse_quote_text() {
+        assert_eq!(
+            parse_quote_line("> this is a quote\n"),
+            Ok(("", vec![
+                MarkdownInLine::Plain(String::from("this is a quote"))
+            ]))
+        );
+        assert_eq!(
+            parse_quote_line("> **this is a bold quote**\n> this is another quote\n"),
+            Ok(("> this is another quote\n", vec![
+                MarkdownInLine::Bold(String::from("this is a bold quote"))
+            ]))
+        );
+        assert_eq!(
+            parse_quote_line(""),
+            Err(Error(("", ErrorKind::Tag)))
+        );
+        assert_eq!(
+            parse_quote_line(">"),
+            Err(Error(("", ErrorKind::Tag)))
+        );
+        assert_eq!(
+            parse_quote_line("not a quote"),
+            Err(Error(("not a quote", ErrorKind::Tag)))
+        );
+    }
+
+    #[test]
+    fn test_parse_quote() {
+        assert_eq!(
+            parse_quote("> this is a quote\n"),
+            Ok(("", vec![
+                vec![MarkdownInLine::Plain(String::from("this is a quote"))],
+            ]))
+        );
+        assert_eq!(
+            parse_quote("> **this is a bold quote**\n> this is another quote\n"),
+            Ok(("", vec![
+                vec![MarkdownInLine::Bold(String::from("this is a bold quote"))],
+                vec![MarkdownInLine::Plain(String::from("this is another quote"))]
+            ]))
+        );
+        assert_eq!(
+            parse_quote("> - this is a list inside a quote\n> - this the second list\n"),
+            Ok(("", vec![
+                vec![MarkdownInLine::Plain(String::from("- this is a list inside a quote"))],
+                vec![MarkdownInLine::Plain(String::from("- this the second list"))]
+            ]))
+        );
     }
 }
